@@ -1,4 +1,5 @@
 import logging
+import re
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -12,14 +13,27 @@ logger = logging.getLogger(__name__)
 
 def get_data(filename):
     logger.info("Loading data from %s", filename)
-    df = pd.read_csv(filename, sep=",", header=1)
-    n_sweep = len(df.columns) - 2
-    logger.info("Loaded %s features from %s", n_sweep, filename)
+    preview_df = pd.read_csv(filename, sep=",", header=None, nrows=2)
+    if preview_df.empty:
+        first_cell = ""
+    else:
+        first_cell = str(preview_df.iloc[0, 0]).strip()
+    header_row = 1 if first_cell == "Sweep Start (s)" else 0
+    logger.info("Detected CSV header row %s for %s", header_row, filename)
+    df = pd.read_csv(filename, sep=",", header=header_row)
+    data_columns = [
+        column
+        for column in df.columns[1:]
+        if str(column).strip() and not str(column).startswith("Unnamed:")
+    ]
+    n_features = len(data_columns)
+    logger.info("Loaded %s features from %s", n_features, filename)
+    data_values = df.loc[:, data_columns].values
     data = nap.TsdFrame(
         t=np.array(df["Time (s)"].values, dtype="float"),
-        d=np.array(df.iloc[:, 1 : (n_sweep + 1)].values, dtype="float"),
+        d=np.array(data_values, dtype="float"),
         time_units="s",
-        columns=df.columns[1 : (n_sweep + 1)],
+        columns=data_columns,
     )
     return data
 
@@ -102,6 +116,7 @@ class DataManager:
         self.filepath = filepath
         logger.info("Initializing DataManager for %s", filepath)
         self.data = get_data(filepath)
+        self.stimulus = None
 
     def figure_filename(self, suffix="png"):
         extension = suffix if suffix.startswith(".") else f".{suffix}"
@@ -113,7 +128,7 @@ class DataManager:
         )
         return filename
 
-    def plot(self, features_per_subplot=3, autosave=False):
+    def plot(self, features_per_subplot=2, autosave=False):
         logger.info(
             "Plot requested for %s with features_per_subplot=%s, autosave=%s",
             self.filepath,
@@ -133,6 +148,91 @@ class DataManager:
             axes,
         )
 
+    def rescale_data(self):
+        logger.info("Rescaling voltage data by 1/20 for %s", self.filepath)
+        rescaled_values = np.asarray(self.data.d, dtype=float) / 20
+        self.data = nap.TsdFrame(
+            t=np.asarray(self.data.t, dtype=float),
+            d=rescaled_values,
+            time_units="s",
+            columns=self.data.columns,
+        )
+        return self.data
+
+    def add_stimulus_data(self, start_time=1.234, end_time=1.734):
+        logger.info(
+            "Generating stimulus data for %s from %s to %s s",
+            self.filepath,
+            start_time,
+            end_time,
+        )
+        time_values = np.asarray(self.data.t, dtype=float)
+        columns = list(self.data.columns)
+        shape = (len(time_values), len(columns))
+        stimulus_values = np.zeros(shape, dtype=float)
+        active_mask = (time_values >= start_time) & (time_values <= end_time)
+
+        for column_idx, column_name in enumerate(columns):
+            sweep_matches = re.findall(r"\d+", str(column_name))
+            if not sweep_matches:
+                raise ValueError(
+                    "Could not determine sweep number from column name: "
+                    f"{column_name}"
+                )
+
+            sweep_number = int(sweep_matches[-1])
+            stimulus_amplitude = -50 + 10 * (sweep_number - 1)
+            stimulus_values[active_mask, column_idx] = stimulus_amplitude
+
+        self.stimulus = nap.TsdFrame(
+            t=time_values,
+            d=stimulus_values,
+            time_units="s",
+            columns=columns,
+        )
+        logger.info("Generated stimulus data for %s sweeps", len(columns))
+        return self.stimulus
+
+    def write_npz(self, output_filepath):
+        output_path = Path(output_filepath).with_suffix(".npz")
+        logger.info("Writing pynapple data to %s", output_path)
+        self.data.save(output_path)
+        logger.info("Wrote pynapple data to %s", output_path)
+        return output_path
+
+    def load_npz(self, input_filepath):
+        input_path = Path(input_filepath).with_suffix(".npz")
+        logger.info("Loading pynapple data from %s", input_path)
+        self.data = nap.load_file(input_path)
+        logger.info("Loaded pynapple data from %s", input_path)
+        return self.data
+
+    def write_csv(self, output_filepath, start_time=1.234, end_time=1.734):
+        logger.info("Writing processed data to %s", output_filepath)
+        if self.stimulus is None:
+            self.add_stimulus_data(start_time=start_time, end_time=end_time)
+
+        time_values = np.asarray(self.data.t, dtype=float)
+        sweep_values = np.asarray(self.data.d, dtype=float)
+        stimulus_values = np.asarray(self.stimulus.d, dtype=float)
+        columns = list(self.data.columns)
+
+        output_data = {"Time (s)": time_values}
+        for column_idx, column_name in enumerate(columns, start=1):
+            stimulus_column = stimulus_values[:, column_idx - 1]
+            sweep_column = sweep_values[:, column_idx - 1]
+            output_data[f"Stimulus {column_idx}"] = stimulus_column
+            output_data[f"Sweep {column_idx}"] = sweep_column
+
+        output_df = pd.DataFrame(output_data)
+        output_df.to_csv(output_filepath, index=False)
+        logger.info(
+            "Wrote CSV with %s sweeps to %s",
+            len(columns),
+            output_filepath,
+        )
+        return output_df
+
     def get_resting_potentials(self, duration_ms=500):
         logger.info(
             "Calculating resting potentials for %s over first %s ms",
@@ -142,7 +242,9 @@ class DataManager:
         duration_s = duration_ms / 1000
         start_time = float(self.data.t[0])
         end_time = start_time + duration_s
-        mask = (self.data.t >= start_time) & (self.data.t <= end_time)
+        start_mask = self.data.t >= start_time
+        end_mask = self.data.t <= end_time
+        mask = start_mask & end_mask
 
         resting_values = np.asarray(self.data.d[mask], dtype=float)
         if resting_values.size == 0:
