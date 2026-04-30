@@ -4,7 +4,21 @@ import matplotlib.pyplot as plt
 
 
 def get_spike_info(trace, threshold=None):
-    """ """
+    """
+    Get spike information from a trace.
+
+    Parameters
+    ----------
+    trace : nap.Tsd
+        The trace to analyze.
+    threshold : float, optional
+        The threshold for spike detection, by default None
+
+    Returns
+    -------
+    tuple
+        A tuple containing the spike times, spike amplitudes, and properties.
+    """
     time = trace.t
     signal = trace.d
     signal_min = np.min(signal)
@@ -22,6 +36,16 @@ def get_spike_info(trace, threshold=None):
 
 # calculate spike info and plot
 def plot_spike_info(trace, title):
+    """
+    Plot spike information from a trace.
+
+    Parameters
+    ----------
+    trace : nap.Tsd
+        The trace to plot.
+    title : str
+        The title of the plot.
+    """
     peak_times, peak_amplitudes, peak_properties = get_spike_info(trace)
     plt.figure()
     plt.plot(trace, marker="")

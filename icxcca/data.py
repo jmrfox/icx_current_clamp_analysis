@@ -7,11 +7,23 @@ import pynapple as nap
 import seaborn as sns
 from pathlib import Path
 
-
 logger = logging.getLogger(__name__)
 
 
 def get_data(filename):
+    """
+    Load data from a CSV file.
+
+    Parameters
+    ----------
+    filename : str
+        The path to the CSV file.
+
+    Returns
+    -------
+    nap.TsdFrame
+        The loaded data.
+    """
     logger.info("Loading data from %s", filename)
     preview_df = pd.read_csv(filename, sep=",", header=None, nrows=2)
     if preview_df.empty:
@@ -39,6 +51,21 @@ def get_data(filename):
 
 
 def plot_all_features(tsdf, features_per_subplot=3):
+    """
+    Plot all features from a TsdFrame.
+
+    Parameters
+    ----------
+    tsdf : nap.TsdFrame
+        The data to plot.
+    features_per_subplot : int, optional
+        The number of features to plot per subplot, by default 3
+
+    Returns
+    -------
+    tuple
+        A tuple containing the figure and axes.
+    """
     n_features = tsdf.d.shape[1]
     n_subplots = int(np.ceil(n_features / features_per_subplot))
     y_values = np.asarray(tsdf.d, dtype=float)
@@ -112,7 +139,24 @@ def plot_all_features(tsdf, features_per_subplot=3):
 
 
 class DataManager:
+    """
+    A class for managing data loading and plotting.
+
+    Parameters
+    ----------
+    filepath : str
+        The path to the data file.
+    """
+
     def __init__(self, filepath):
+        """
+        Initialize the DataManager.
+
+        Parameters
+        ----------
+        filepath : str
+            The path to the data file.
+        """
         self.filepath = Path(filepath)
         logger.info("Initializing DataManager for %s", filepath)
         if self.filepath.suffix == ".npz":
@@ -122,6 +166,19 @@ class DataManager:
         self.stimulus = None
 
     def figure_filename(self, suffix="png"):
+        """
+        Generate a figure filename based on the data file path.
+
+        Parameters
+        ----------
+        suffix : str, optional
+            The file extension for the figure, by default "png"
+
+        Returns
+        -------
+        str
+            The derived figure filename.
+        """
         extension = suffix if suffix.startswith(".") else f".{suffix}"
         filename = Path(self.filepath).with_suffix(extension).name
         logger.info(
@@ -132,6 +189,21 @@ class DataManager:
         return filename
 
     def plot(self, features_per_subplot=2, autosave=False):
+        """
+        Plot the data.
+
+        Parameters
+        ----------
+        features_per_subplot : int, optional
+            The number of features to plot per subplot, by default 2
+        autosave : bool, optional
+            Whether to automatically save the figure, by default False
+
+        Returns
+        -------
+        tuple
+            A tuple containing the figure and axes.
+        """
         logger.info(
             "Plot requested for %s with features_per_subplot=%s, autosave=%s",
             self.filepath,
@@ -151,9 +223,22 @@ class DataManager:
             axes,
         )
 
-    def rescale_data(self):
-        logger.info("Rescaling voltage data by 1/20 for %s", self.filepath)
-        rescaled_values = np.asarray(self.data.d, dtype=float) / 20
+    def rescale_data(self, scale_factor=0.05):
+        """
+        Rescale the voltage data by the specified scale factor.
+
+        Parameters
+        ----------
+        scale_factor : float, optional
+            The scale factor to apply, by default 0.05
+
+        Returns
+        -------
+        nap.TsdFrame
+            The rescaled data.
+        """
+        logger.info("Rescaling voltage data by %s for %s", scale_factor, self.filepath)
+        rescaled_values = np.asarray(self.data.d, dtype=float) * scale_factor
         self.data = nap.TsdFrame(
             t=np.asarray(self.data.t, dtype=float),
             d=rescaled_values,
@@ -163,6 +248,20 @@ class DataManager:
         return self.data
 
     def add_stimulus_data(self, start_time=1.234, end_time=1.734):
+        """
+        Add stimulus data to the data.
+
+        Parameters
+        ----------
+        start_time : float, optional
+            The start time of the stimulus, by default 1.234
+        end_time : float, optional
+            The end time of the stimulus, by default 1.734
+
+        Returns
+        -------
+        None
+        """
         logger.info(
             "Generating stimulus data for %s from %s to %s s",
             self.filepath,
@@ -197,6 +296,19 @@ class DataManager:
         return self.stimulus
 
     def write_npz(self, output_filepath):
+        """
+        Write the data to a numpy file.
+
+        Parameters
+        ----------
+        output_filepath : str
+            The path to the output file.
+
+        Returns
+        -------
+        Path
+            The path to the output file.
+        """
         output_path = Path(output_filepath).with_suffix(".npz")
         logger.info("Writing pynapple data to %s", output_path)
         self.data.save(output_path)
@@ -204,6 +316,19 @@ class DataManager:
         return output_path
 
     def load_npz(self, input_filepath):
+        """
+        Load the data from a numpy file.
+
+        Parameters
+        ----------
+        input_filepath : str
+            The path to the input file.
+
+        Returns
+        -------
+        Data
+            The loaded data.
+        """
         input_path = Path(input_filepath).with_suffix(".npz")
         logger.info("Loading pynapple data from %s", input_path)
         self.data = nap.load_file(input_path)
@@ -211,6 +336,14 @@ class DataManager:
         return self.data
 
     def get_current_data(self):
+        """
+        Get the current data from the data.
+
+        Returns
+        -------
+        nap.TsdFrame
+            The current data.
+        """
         columns = [
             column
             for column in self.data.columns
@@ -228,6 +361,14 @@ class DataManager:
         )
 
     def get_voltage_data(self):
+        """
+        Get the voltage data from the data.
+
+        Returns
+        -------
+        nap.TsdFrame
+            The voltage data.
+        """
         columns = [
             column
             for column in self.data.columns
@@ -245,6 +386,22 @@ class DataManager:
         )
 
     def write_csv(self, output_filepath, start_time=1.234, end_time=1.734):
+        """
+        Write the processed data to a CSV file.
+
+        Parameters
+        ----------
+        output_filepath : str
+            The path to the output file.
+        start_time : float, optional
+            The start time of the stimulus, by default 1.234
+        end_time : float, optional
+            The end time of the stimulus, by default 1.734
+
+        Returns
+        -------
+        None
+        """
         logger.info("Writing processed data to %s", output_filepath)
         if self.stimulus is None:
             self.add_stimulus_data(start_time=start_time, end_time=end_time)
@@ -273,6 +430,19 @@ class DataManager:
         return output_df
 
     def get_resting_potentials(self, duration_ms=500):
+        """
+        Calculate the resting potentials for the data.
+
+        Parameters
+        ----------
+        duration_ms : int, optional
+            The duration of the resting potential window in milliseconds, by default 500
+
+        Returns
+        -------
+        np.ndarray
+            The resting potentials.
+        """
         logger.info(
             "Calculating resting potentials for %s over first %s ms",
             self.filepath,
