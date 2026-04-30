@@ -113,9 +113,12 @@ def plot_all_features(tsdf, features_per_subplot=3):
 
 class DataManager:
     def __init__(self, filepath):
-        self.filepath = filepath
+        self.filepath = Path(filepath)
         logger.info("Initializing DataManager for %s", filepath)
-        self.data = get_data(filepath)
+        if self.filepath.suffix == ".npz":
+            self.data = nap.load_file(self.filepath)
+        else:
+            self.data = get_data(self.filepath)
         self.stimulus = None
 
     def figure_filename(self, suffix="png"):
@@ -207,22 +210,58 @@ class DataManager:
         logger.info("Loaded pynapple data from %s", input_path)
         return self.data
 
+    def get_current_data(self):
+        columns = [
+            column
+            for column in self.data.columns
+            if str(column).startswith(("Stimulus", "Current"))
+        ]
+        n_columns = len(columns)
+        logger.info("Extracting %s current features", n_columns)
+        current_data = self.data[columns]
+        current_values = np.asarray(current_data.d, dtype=float)
+        return nap.TsdFrame(
+            t=np.asarray(self.data.t, dtype=float),
+            d=current_values.copy(),
+            time_units="s",
+            columns=columns,
+        )
+
+    def get_voltage_data(self):
+        columns = [
+            column
+            for column in self.data.columns
+            if str(column).startswith(("Sweep", "Voltage"))
+        ]
+        n_columns = len(columns)
+        logger.info("Extracting %s voltage features", n_columns)
+        voltage_data = self.data[columns]
+        voltage_values = np.asarray(voltage_data.d, dtype=float)
+        return nap.TsdFrame(
+            t=np.asarray(self.data.t, dtype=float),
+            d=voltage_values.copy(),
+            time_units="s",
+            columns=columns,
+        )
+
     def write_csv(self, output_filepath, start_time=1.234, end_time=1.734):
         logger.info("Writing processed data to %s", output_filepath)
         if self.stimulus is None:
             self.add_stimulus_data(start_time=start_time, end_time=end_time)
 
         time_values = np.asarray(self.data.t, dtype=float)
-        sweep_values = np.asarray(self.data.d, dtype=float)
-        stimulus_values = np.asarray(self.stimulus.d, dtype=float)
+        voltage_values = np.asarray(self.data.d, dtype=float)
+        current_values = np.asarray(self.stimulus.d, dtype=float)
         columns = list(self.data.columns)
 
         output_data = {"Time (s)": time_values}
         for column_idx, column_name in enumerate(columns, start=1):
-            stimulus_column = stimulus_values[:, column_idx - 1]
-            sweep_column = sweep_values[:, column_idx - 1]
-            output_data[f"Stimulus {column_idx}"] = stimulus_column
-            output_data[f"Sweep {column_idx}"] = sweep_column
+            current_column = current_values[:, column_idx - 1]
+            voltage_column = voltage_values[:, column_idx - 1]
+            current_name = f"Current {column_idx}"
+            voltage_name = f"Voltage {column_idx}"
+            output_data[current_name] = current_column
+            output_data[voltage_name] = voltage_column
 
         output_df = pd.DataFrame(output_data)
         output_df.to_csv(output_filepath, index=False)
@@ -248,10 +287,12 @@ class DataManager:
 
         resting_values = np.asarray(self.data.d[mask], dtype=float)
         if resting_values.size == 0:
-            logger.warning(
-                "No samples found in resting potential window for %s",
-                self.filepath,
+            warning_message = (
+                "No samples found in resting potential window for %s. "
+                "Please check the duration_ms parameter."
             )
+            warning_path = self.filepath
+            logger.warning(warning_message, warning_path)
             raise ValueError("No samples found in the resting potential window.")
         resting_potentials = resting_values.mean(axis=0)
         logger.info(
