@@ -4,8 +4,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pynapple as nap
-import seaborn as sns
 from pathlib import Path
+
+from .spikes import get_spike_info as compute_spike_info
+from .viz import plot_all_features, plot_trial_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -50,97 +52,20 @@ def get_data(filename):
     return data
 
 
-def plot_all_features(tsdf, features_per_subplot=3):
-    """
-    Plot all features from a TsdFrame.
-
-    Parameters
-    ----------
-    tsdf : nap.TsdFrame
-        The data to plot.
-    features_per_subplot : int, optional
-        The number of features to plot per subplot, by default 3
-
-    Returns
-    -------
-    tuple
-        A tuple containing the figure and axes.
-    """
-    n_features = tsdf.d.shape[1]
-    n_subplots = int(np.ceil(n_features / features_per_subplot))
-    y_values = np.asarray(tsdf.d, dtype=float)
-    y_min = float(np.nanmin(y_values))
-    y_max = float(np.nanmax(y_values))
-    logger.info(
-        "Plotting %s features across %s subplots",
-        n_features,
-        n_subplots,
-    )
-    logger.info("Using shared y-limits: [%s, %s]", y_min, y_max)
-    ncols = int(np.ceil(np.sqrt(n_subplots)))
-    nrows = int(np.ceil(n_subplots / ncols))
-
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(5 * ncols, 3.5 * nrows),
-        sharex=True,
-    )
-    axes = np.atleast_1d(axes).ravel()
-
-    columns = (
-        list(tsdf.columns)
-        if hasattr(tsdf, "columns")
-        else [f"Feature {i}" for i in range(n_features)]
-    )
-
-    for subplot_idx, ax in enumerate(axes):
-        start = subplot_idx * features_per_subplot
-        end = min(start + features_per_subplot, n_features)
-
-        if start >= n_features:
-            ax.set_visible(False)
-            continue
-
-        subplot_data = pd.DataFrame(
-            np.asarray(tsdf.d[:, start:end], dtype=float),
-            columns=columns[start:end],
-        )
-        subplot_data.insert(0, "Time (s)", np.asarray(tsdf.t, dtype=float))
-        subplot_data = subplot_data.melt(
-            id_vars="Time (s)",
-            var_name="Feature",
-            value_name="Value",
-        )
-
-        sns.lineplot(
-            data=subplot_data,
-            x="Time (s)",
-            y="Value",
-            hue="Feature",
-            ax=ax,
-            legend=True,
-        )
-        ax.set_title(f"Features {start} to {end - 1}")
-        ax.set_xlabel("Time (s)")
-        ax.set_ylabel("Value")
-        y_span = y_max - y_min
-        ax.set_ylim(y_min - 0.05 * y_span, y_max + 0.05 * y_span)
-        legend = ax.get_legend()
-        if legend is not None:
-            sns.move_legend(ax, "best", frameon=False)
-
-    fig.tight_layout()
-    logger.info("Created feature plot figure")
-    return (
-        fig,
-        axes,
-    )
+def get_feature_subset(tsdf, feature_names):
+    columns = list(tsdf.columns)
+    missing_features = [
+        feature_name for feature_name in feature_names if feature_name not in columns
+    ]
+    if missing_features:
+        message = f"Features not found in data columns: {missing_features}"
+        raise ValueError(message)
+    return tsdf[feature_names].copy()
 
 
 class DataManager:
     """
-    A class for managing data loading and plotting.
+    A class for managing voltage recordings, current stimuli, and plotting.
 
     Parameters
     ----------
@@ -164,6 +89,7 @@ class DataManager:
         else:
             self.data = get_data(self.filepath)
         self.stimulus = None
+        self.stimulus_epoch = None
 
     def figure_filename(self, suffix="png"):
         """
@@ -188,7 +114,13 @@ class DataManager:
         )
         return filename
 
-    def plot(self, features_per_subplot=2, autosave=False):
+    def plot(
+        self,
+        features_per_subplot=2,
+        autosave=False,
+        feature_names=None,
+        trial_indices=None,
+    ):
         """
         Plot the data.
 
@@ -198,22 +130,41 @@ class DataManager:
             The number of features to plot per subplot, by default 2
         autosave : bool, optional
             Whether to automatically save the figure, by default False
+        feature_names : list[str] | None, optional
+            Explicit feature names to plot.
+        trial_indices : list[int] | None, optional
+            Sweep indices to plot as paired current and voltage traces.
 
         Returns
         -------
         tuple
             A tuple containing the figure and axes.
         """
+        if feature_names is not None and trial_indices is not None:
+            message = "Specify either feature_names or trial_indices, not both."
+            raise ValueError(message)
         logger.info(
-            "Plot requested for %s with features_per_subplot=%s, autosave=%s",
+            "Plot requested for %s with features_per_subplot=%s, autosave=%s, "
+            "feature_names=%s, trial_indices=%s",
             self.filepath,
             features_per_subplot,
             autosave,
+            feature_names,
+            trial_indices,
         )
-        fig, axes = plot_all_features(
-            self.data,
-            features_per_subplot=features_per_subplot,
-        )
+        if feature_names is not None:
+            plot_data = get_feature_subset(self.data, feature_names)
+            fig, axes = plot_all_features(
+                plot_data,
+                features_per_subplot=features_per_subplot,
+            )
+        elif trial_indices is not None:
+            fig, axes = self._plot_trials(trial_indices)
+        else:
+            fig, axes = plot_all_features(
+                self.data,
+                features_per_subplot=features_per_subplot,
+            )
         if autosave:
             save_filename = self.figure_filename()
             logger.info("Saving figure to %s", save_filename)
@@ -247,53 +198,103 @@ class DataManager:
         )
         return self.data
 
-    def add_stimulus_data(self, start_time=1.234, end_time=1.734):
+    def add_current_data(self, start_time=1.234, end_time=1.734):
         """
-        Add stimulus data to the data.
+        Generate current stimulus data for each voltage recording.
 
         Parameters
         ----------
         start_time : float, optional
-            The start time of the stimulus, by default 1.234
+            The start time of the stimulus epoch, by default 1.234
         end_time : float, optional
-            The end time of the stimulus, by default 1.734
+            The end time of the stimulus epoch, by default 1.734
 
         Returns
         -------
-        None
+        nap.TsdFrame
+            The generated current traces.
         """
         logger.info(
-            "Generating stimulus data for %s from %s to %s s",
+            "Generating current data for %s from %s to %s s",
             self.filepath,
             start_time,
             end_time,
         )
         time_values = np.asarray(self.data.t, dtype=float)
-        columns = list(self.data.columns)
-        shape = (len(time_values), len(columns))
-        stimulus_values = np.zeros(shape, dtype=float)
+        voltage_columns = list(self.data.columns)
+        shape = (len(time_values), len(voltage_columns))
+        current_values = np.zeros(shape, dtype=float)
         active_mask = (time_values >= start_time) & (time_values <= end_time)
 
-        for column_idx, column_name in enumerate(columns):
-            sweep_matches = re.findall(r"\d+", str(column_name))
-            if not sweep_matches:
+        for column_idx, voltage_name in enumerate(voltage_columns):
+            trial_matches = re.findall(r"\d+", str(voltage_name))
+            if not trial_matches:
                 raise ValueError(
-                    "Could not determine sweep number from column name: "
-                    f"{column_name}"
+                    "Could not determine trial index from column name: "
+                    f"{voltage_name}"
                 )
 
-            sweep_number = int(sweep_matches[-1])
-            stimulus_amplitude = -50 + 10 * (sweep_number - 1)
-            stimulus_values[active_mask, column_idx] = stimulus_amplitude
+            trial_index = int(trial_matches[-1])
+            current_amplitude = -50 + 10 * (trial_index - 1)
+            current_values[active_mask, column_idx] = current_amplitude
 
         self.stimulus = nap.TsdFrame(
             t=time_values,
-            d=stimulus_values,
+            d=current_values,
             time_units="s",
-            columns=columns,
+            columns=voltage_columns,
         )
-        logger.info("Generated stimulus data for %s sweeps", len(columns))
+        self.stimulus_epoch = nap.IntervalSet(
+            start=[start_time],
+            end=[end_time],
+            time_units="s",
+        )
+        logger.info(
+            "Generated current data for %s voltage recordings",
+            len(voltage_columns),
+        )
         return self.stimulus
+
+    def add_stimulus_data(self, start_time=1.234, end_time=1.734):
+        """
+        Backward-compatible wrapper for `add_current_data`.
+
+        Parameters
+        ----------
+        start_time : float, optional
+            The start time of the stimulus epoch, by default 1.234.
+        end_time : float, optional
+            The end time of the stimulus epoch, by default 1.734.
+
+        Returns
+        -------
+        nap.TsdFrame
+            The generated current traces.
+        """
+        return self.add_current_data(
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+    def get_stimulus_epoch(self, start_time=1.234, end_time=1.734):
+        """
+        Get the epoch during which nonzero current was applied.
+
+        Parameters
+        ----------
+        start_time : float, optional
+            The start time of the stimulus epoch, by default 1.234.
+        end_time : float, optional
+            The end time of the stimulus epoch, by default 1.734.
+
+        Returns
+        -------
+        nap.IntervalSet
+            The current-application epoch.
+        """
+        if self.stimulus_epoch is None:
+            self.add_current_data(start_time=start_time, end_time=end_time)
+        return self.stimulus_epoch
 
     def write_npz(self, output_filepath):
         """
@@ -337,7 +338,7 @@ class DataManager:
 
     def get_current_data(self):
         """
-        Get the current data from the data.
+        Get the current stimulus data from the dataset.
 
         Returns
         -------
@@ -351,18 +352,11 @@ class DataManager:
         ]
         n_columns = len(columns)
         logger.info("Extracting %s current features", n_columns)
-        current_data = self.data[columns]
-        current_values = np.asarray(current_data.d, dtype=float)
-        return nap.TsdFrame(
-            t=np.asarray(self.data.t, dtype=float),
-            d=current_values.copy(),
-            time_units="s",
-            columns=columns,
-        )
+        return self.data[columns].copy()
 
     def get_voltage_data(self):
         """
-        Get the voltage data from the data.
+        Get the recorded voltage data from the dataset.
 
         Returns
         -------
@@ -376,14 +370,247 @@ class DataManager:
         ]
         n_columns = len(columns)
         logger.info("Extracting %s voltage features", n_columns)
-        voltage_data = self.data[columns]
-        voltage_values = np.asarray(voltage_data.d, dtype=float)
-        return nap.TsdFrame(
-            t=np.asarray(self.data.t, dtype=float),
-            d=voltage_values.copy(),
-            time_units="s",
-            columns=columns,
+        return self.data[columns].copy()
+
+    def _resolve_voltage_features(self, feature_names=None, trial_indices=None):
+        if feature_names is not None and trial_indices is not None:
+            message = "Specify either feature_names or trial_indices, not both."
+            raise ValueError(message)
+
+        voltage_data = self.get_voltage_data()
+        voltage_columns = list(voltage_data.columns)
+
+        if feature_names is not None:
+            selected_columns = list(
+                get_feature_subset(voltage_data, feature_names).columns
+            )
+        elif trial_indices is not None:
+            selected_columns = []
+            for trial_index in trial_indices:
+                if trial_index < 0:
+                    message = "trial_indices must be non-negative."
+                    raise ValueError(message)
+                if trial_index >= len(voltage_columns):
+                    message = (
+                        f"Trial index {trial_index} is out of range "
+                        "for voltage data."
+                    )
+                    raise ValueError(message)
+                selected_columns.append(voltage_columns[trial_index])
+        else:
+            selected_columns = voltage_columns
+
+        return voltage_data, selected_columns
+
+    def get_spike_info(
+        self,
+        threshold=None,
+        feature_names=None,
+        trial_indices=None,
+    ):
+        """
+        Compute spike information for selected voltage traces.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            Detection threshold passed to the spike detector.
+        feature_names : list[str] | None, optional
+            Explicit voltage feature names to analyze.
+        trial_indices : list[int] | None, optional
+            Trial indices of voltage traces to analyze.
+
+        Returns
+        -------
+        dict
+            Mapping of voltage feature name to spike information.
+        """
+        voltage_data, selected_columns = self._resolve_voltage_features(
+            feature_names=feature_names,
+            trial_indices=trial_indices,
         )
+        spike_info = {}
+        for column_name in selected_columns:
+            trace = voltage_data[column_name]
+            spike_times, spike_amplitudes, properties = compute_spike_info(
+                trace,
+                threshold=threshold,
+            )
+            spike_info[column_name] = {
+                "trace": trace,
+                "spike_times": np.asarray(spike_times, dtype=float),
+                "spike_amplitudes": np.asarray(spike_amplitudes, dtype=float),
+                "properties": properties,
+            }
+
+        logger.info(
+            "Computed spike information for %s voltage traces",
+            len(spike_info),
+        )
+        return spike_info
+
+    def get_spike_times(
+        self,
+        threshold=None,
+        feature_names=None,
+        trial_indices=None,
+    ):
+        """
+        Get spike times for selected voltage traces as a TsGroup.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            Detection threshold passed to the spike detector.
+        feature_names : list[str] | None, optional
+            Explicit voltage feature names to analyze.
+        trial_indices : list[int] | None, optional
+            Trial indices of voltage traces to analyze.
+
+        Returns
+        -------
+        nap.TsGroup
+            Spike times grouped by voltage feature.
+        """
+        spike_info = self.get_spike_info(
+            threshold=threshold,
+            feature_names=feature_names,
+            trial_indices=trial_indices,
+        )
+        spike_trains = {
+            column_name: nap.Ts(t=info["spike_times"], time_units="s")
+            for column_name, info in spike_info.items()
+        }
+        return nap.TsGroup(spike_trains)
+
+    def plot_spike_info(
+        self,
+        threshold=None,
+        feature_names=None,
+        trial_indices=None,
+        autosave=False,
+    ):
+        """
+        Plot selected voltage traces with detected spikes labelled.
+
+        Parameters
+        ----------
+        threshold : float, optional
+            Detection threshold passed to the spike detector.
+        feature_names : list[str] | None, optional
+            Explicit voltage feature names to plot.
+        trial_indices : list[int] | None, optional
+            Trial indices of voltage traces to plot.
+        autosave : bool, optional
+            Whether to automatically save the figure, by default False.
+
+        Returns
+        -------
+        tuple
+            A tuple containing the figure and axes.
+        """
+        spike_info = self.get_spike_info(
+            threshold=threshold,
+            feature_names=feature_names,
+            trial_indices=trial_indices,
+        )
+        n_features = len(spike_info)
+        if n_features == 0:
+            raise ValueError("No voltage traces available for spike plotting.")
+
+        ncols = int(np.ceil(np.sqrt(n_features)))
+        nrows = int(np.ceil(n_features / ncols))
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(5 * ncols, 3.5 * nrows),
+            sharex=True,
+        )
+        axes = np.atleast_1d(axes).ravel()
+
+        for ax, (column_name, info) in zip(axes, spike_info.items()):
+            time_values = np.asarray(info["trace"].t, dtype=float)
+            voltage_values = np.asarray(info["trace"].d, dtype=float)
+            ax.plot(time_values, voltage_values, label=column_name)
+            ax.scatter(
+                info["spike_times"],
+                info["spike_amplitudes"],
+                color="red",
+                label="Spikes",
+                zorder=3,
+            )
+            ax.set_title(column_name)
+            ax.set_xlabel("Time (s)")
+            ax.set_ylabel("Voltage")
+            legend = ax.get_legend()
+            if legend is None:
+                ax.legend(frameon=False)
+
+        for ax in axes[n_features:]:
+            ax.set_visible(False)
+
+        fig.tight_layout()
+        if autosave:
+            save_filename = self.figure_filename(suffix="spikes.png")
+            logger.info("Saving spike figure to %s", save_filename)
+            fig.savefig(save_filename)
+        return fig, axes
+
+    def _plot_trials(self, trial_indices):
+        if len(trial_indices) == 0:
+            message = "trial_indices must contain at least one trial index."
+            raise ValueError(message)
+
+        voltage_data = self.get_voltage_data()
+        voltage_columns = list(voltage_data.columns)
+        current_columns = [
+            column
+            for column in self.data.columns
+            if str(column).startswith(("Stimulus", "Current"))
+        ]
+        if current_columns:
+            current_data = self.get_current_data()
+        else:
+            if self.stimulus is None:
+                self.add_current_data()
+            current_data = self.stimulus.copy()
+            current_columns = list(current_data.columns)
+
+        trial_pairs = []
+        for trial_index in trial_indices:
+            if trial_index < 0:
+                message = "trial_indices must be non-negative."
+                raise ValueError(message)
+            if trial_index >= len(voltage_columns):
+                message = (
+                    f"Trial index {trial_index} is out of range " "for voltage data."
+                )
+                raise ValueError(message)
+            if trial_index >= len(current_columns):
+                message = (
+                    f"Trial index {trial_index} is out of range " "for current data."
+                )
+                raise ValueError(message)
+            voltage_name = voltage_columns[trial_index]
+            current_name = current_columns[trial_index]
+            trial_pairs.append(
+                {
+                    "trial_index": trial_index,
+                    "current_name": current_name,
+                    "voltage_name": voltage_name,
+                    "current": np.asarray(
+                        current_data[current_name].d,
+                        dtype=float,
+                    ),
+                    "voltage": np.asarray(
+                        voltage_data[voltage_name].d,
+                        dtype=float,
+                    ),
+                }
+            )
+
+        time_values = np.asarray(self.data.t, dtype=float)
+        return plot_trial_pairs(time_values, trial_pairs)
 
     def write_csv(self, output_filepath, start_time=1.234, end_time=1.734):
         """
@@ -394,9 +621,9 @@ class DataManager:
         output_filepath : str
             The path to the output file.
         start_time : float, optional
-            The start time of the stimulus, by default 1.234
+            The start time of the stimulus epoch, by default 1.234
         end_time : float, optional
-            The end time of the stimulus, by default 1.734
+            The end time of the stimulus epoch, by default 1.734
 
         Returns
         -------
@@ -404,7 +631,7 @@ class DataManager:
         """
         logger.info("Writing processed data to %s", output_filepath)
         if self.stimulus is None:
-            self.add_stimulus_data(start_time=start_time, end_time=end_time)
+            self.add_current_data(start_time=start_time, end_time=end_time)
 
         time_values = np.asarray(self.data.t, dtype=float)
         voltage_values = np.asarray(self.data.d, dtype=float)
@@ -423,7 +650,7 @@ class DataManager:
         output_df = pd.DataFrame(output_data)
         output_df.to_csv(output_filepath, index=False)
         logger.info(
-            "Wrote CSV with %s sweeps to %s",
+            "Wrote CSV with %s voltage/current trial pairs to %s",
             len(columns),
             output_filepath,
         )
@@ -451,11 +678,11 @@ class DataManager:
         duration_s = duration_ms / 1000
         start_time = float(self.data.t[0])
         end_time = start_time + duration_s
-        start_mask = self.data.t >= start_time
-        end_mask = self.data.t <= end_time
-        mask = start_mask & end_mask
-
-        resting_values = np.asarray(self.data.d[mask], dtype=float)
+        resting_data = self.data.get(start_time, end_time)
+        resting_values = np.asarray(
+            resting_data.d,
+            dtype=float,
+        )
         if resting_values.size == 0:
             warning_message = (
                 "No samples found in resting potential window for %s. "

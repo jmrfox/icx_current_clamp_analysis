@@ -1,6 +1,5 @@
-from scipy.signal import find_peaks
 import numpy as np
-import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
 
 
 def get_spike_info(trace, threshold=None):
@@ -12,46 +11,57 @@ def get_spike_info(trace, threshold=None):
     trace : nap.Tsd
         The trace to analyze.
     threshold : float, optional
-        The threshold for spike detection, by default None
+        The threshold for spike detection.
+        By default (None) 0.8 of the amplitude.
 
     Returns
     -------
     tuple
         A tuple containing the spike times, spike amplitudes, and properties.
     """
-    time = trace.t
-    signal = trace.d
+    time = np.asarray(trace.t, dtype=float)
+    signal = np.asarray(trace.d, dtype=float)
     signal_min = np.min(signal)
     signal_max = np.max(signal)
     n_samples = len(signal)
+    if n_samples < 3:
+        empty_indices = np.array([], dtype=int)
+        empty_properties = {
+            "peak_heights": np.array([], dtype=float),
+            "prominences": np.array([], dtype=float),
+            "second_derivative": np.array([], dtype=float),
+        }
+        return time[empty_indices], signal[empty_indices], empty_properties
+
+    signal_range = signal_max - signal_min
+    second_derivative = np.gradient(np.gradient(signal))
+    noise_level = np.median(np.abs(signal - np.median(signal)))
+    curvature_level = np.median(np.abs(second_derivative))
+
     if threshold is None:
-        threshold = signal_max - 0.2 * (signal_max - signal_min)
+        threshold = signal_max - 0.2 * signal_range
+
+    min_distance = max(1, n_samples // 100)
+    min_prominence = max(signal_range * 0.1, noise_level * 6)
     indices, properties = find_peaks(
-        signal, height=threshold, distance=n_samples // 100
+        signal,
+        height=threshold,
+        distance=min_distance,
+        prominence=min_prominence,
     )
+
+    if indices.size == 0:
+        properties["second_derivative"] = np.array([], dtype=float)
+        return time[indices], signal[indices], properties
+
+    peak_curvature = np.abs(second_derivative[indices])
+    min_curvature = max(curvature_level * 8, 1e-12)
+    keep_mask = peak_curvature >= min_curvature
+    indices = indices[keep_mask]
+    properties = {
+        key: np.asarray(value)[keep_mask] for key, value in properties.items()
+    }
+    properties["second_derivative"] = peak_curvature[keep_mask]
     spike_times = time[indices]
     spike_amplitudes = signal[indices]
     return spike_times, spike_amplitudes, properties
-
-
-# calculate spike info and plot
-def plot_spike_info(trace, title):
-    """
-    Plot spike information from a trace.
-
-    Parameters
-    ----------
-    trace : nap.Tsd
-        The trace to plot.
-    title : str
-        The title of the plot.
-    """
-    peak_times, peak_amplitudes, peak_properties = get_spike_info(trace)
-    plt.figure()
-    plt.plot(trace, marker="")
-    plt.scatter(peak_times, peak_amplitudes, color="red", label="Peaks")
-    plt.title(title)
-    plt.xlabel("Time (s)")
-    plt.ylabel("Amplitude")
-    plt.legend()
-    plt.show()
